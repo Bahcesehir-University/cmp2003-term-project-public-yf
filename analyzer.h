@@ -1,8 +1,8 @@
 #ifndef ANALYZER_H
 #define ANALYZER_H
 
-#include <string>
 #include <vector>
+#include <string>
 #include <unordered_map>
 #include <array>
 
@@ -19,7 +19,9 @@ struct SlotCount {
 
 class TripAnalyzer {
 public:
-    void ingestFile(const std::string& csvPath);
+    void ingestStdin();
+    void ingestFile(const std::string& filename);
+
     std::vector<ZoneCount> topZones(int k = 10) const;
     std::vector<SlotCount> topBusySlots(int k = 10) const;
 
@@ -31,5 +33,3 @@ private:
 };
 
 #endif
-
-
