@@ -1,62 +1,47 @@
 #include "analyzer.h"
-
+#include <unordered_map>
+#include <vector>
+#include <array>
+#include <string>
 #include <fstream>
 #include <algorithm>
-#include <queue>
 #include <cctype>
 
 using namespace std;
 
 namespace {
 
-static inline void trimInPlace(string& s) {
+inline void trim(string& s) {
     size_t b = 0;
-    while (b < s.size() && isspace((unsigned char)s[b])) ++b;
+    while (b < s.size() && isspace((unsigned char)s[b])) b++;
     size_t e = s.size();
-    while (e > b && isspace((unsigned char)s[e - 1])) --e;
-    if (b == 0 && e == s.size()) return;
+    while (e > b && isspace((unsigned char)s[e - 1])) e--;
     s = s.substr(b, e - b);
 }
 
-static inline vector<string> splitCSV6(const string& line) {
+vector<string> splitCSV(const string& line) {
     vector<string> out;
-    out.reserve(6);
     size_t start = 0;
     while (start <= line.size()) {
-        size_t comma = line.find(',', start);
-        if (comma == string::npos) comma = line.size();
-        string field = line.substr(start, comma - start);
-        trimInPlace(field);
-        out.push_back(std::move(field));
-        if (comma == line.size()) break;
-        start = comma + 1;
+        size_t pos = line.find(',', start);
+        if (pos == string::npos) pos = line.size();
+        string field = line.substr(start, pos - start);
+        trim(field);
+        out.push_back(field);
+        if (pos == line.size()) break;
+        start = pos + 1;
     }
     return out;
 }
 
-static inline bool isLikelyHeader(const string& line) {
-    return (line.find("TripID") != string::npos) &&
-           (line.find("PickupZoneID") != string::npos);
-}
+bool parseHour(const string& dt, int& hour) {
+    size_t space = dt.find(' ');
+    if (space == string::npos || space + 1 >= dt.size()) return false;
 
-static inline bool parseHour(const string& pickupDateTime, int& hourOut) {
-    string s = pickupDateTime;
-    trimInPlace(s);
-    if (s.empty()) return false;
-
-    size_t sep = s.find(' ');
-    if (sep == string::npos) sep = s.find('T');
-    if (sep == string::npos || sep + 1 >= s.size()) return false;
-
-    string t = s.substr(sep + 1);
-    trimInPlace(t);
-    if (t.empty()) return false;
-
-    size_t colon = t.find(':');
+    size_t colon = dt.find(':', space + 1);
     if (colon == string::npos) return false;
 
-    string h = t.substr(0, colon);
-    trimInPlace(h);
+    string h = dt.substr(space + 1, colon - (space + 1));
     if (h.empty() || h.size() > 2) return false;
 
     int val = 0;
@@ -64,137 +49,92 @@ static inline bool parseHour(const string& pickupDateTime, int& hourOut) {
         if (!isdigit((unsigned char)c)) return false;
         val = val * 10 + (c - '0');
     }
-    if (val < 0 || val > 23) return false;
 
-    hourOut = val;
+    if (val < 0 || val > 23) return false;
+    hour = val;
     return true;
 }
 
-struct BetterZone {
-    bool operator()(const ZoneCount& a, const ZoneCount& b) const {
-        if (a.count != b.count) return a.count > b.count;
-        return a.zone < b.zone;
-    }
-};
-
-struct BetterSlot {
-    bool operator()(const SlotCount& a, const SlotCount& b) const {
-        if (a.count != b.count) return a.count > b.count;
-        if (a.zone != b.zone) return a.zone < b.zone;
-        return a.hour < b.hour;
-    }
-};
-
-template <class T, class Better>
-static vector<T> topKByHeap(const vector<T>& items, int k, Better better) {
-    if (k <= 0 || items.empty()) return {};
-
-    priority_queue<T, vector<T>, Better> pq(better);
-    for (const auto& it : items) {
-        if ((int)pq.size() < k) {
-            pq.push(it);
-        } else if (better(it, pq.top())) {
-            pq.pop();
-            pq.push(it);
-        }
-    }
-
-    vector<T> out;
-    out.reserve(pq.size());
-    while (!pq.empty()) {
-        out.push_back(pq.top());
-        pq.pop();
-    }
-    sort(out.begin(), out.end(), better);
-    return out;
 }
 
-} // namespace
+static unordered_map<string, int> zoneId;
+static vector<string> idZone;
+static vector<long long> zoneTotal;
+static vector<array<long long, 24>> zoneHour;
 
-void TripAnalyzer::ingestFile(const string& filename) {
-    zoneToId_.clear();
-    idToZone_.clear();
-    zoneTotal_.clear();
-    zoneHour_.clear();
+void TripAnalyzer::ingestFile(const string& csvPath) {
+    zoneId.clear();
+    idZone.clear();
+    zoneTotal.clear();
+    zoneHour.clear();
 
-    ifstream fin(filename);
-    if (!fin.is_open()) return;
+    ifstream file(csvPath);
+    if (!file.is_open()) return;
 
     string line;
-    bool firstLine = true;
-    zoneToId_.reserve(200000);
+    bool first = true;
 
-    while (getline(fin, line)) {
-        if (firstLine) {
-            firstLine = false;
-            if (isLikelyHeader(line)) continue;
-        }
+    while (getline(file, line)) {
+        if (first) { first = false; continue; }
         if (line.empty()) continue;
 
-        auto fields = splitCSV6(line);
-        if (fields.size() < 6) continue;
+        auto fields = splitCSV(line);
+        if (fields.size() < 3) continue;
 
         const string& zone = fields[1];
-        const string& dt   = fields[3];
+        const string& dt   = fields[2];
         if (zone.empty() || dt.empty()) continue;
 
-        int hour = -1;
+        int hour;
         if (!parseHour(dt, hour)) continue;
 
         int id;
-        auto it = zoneToId_.find(zone);
-        if (it == zoneToId_.end()) {
-            id = (int)idToZone_.size();
-            zoneToId_.emplace(zone, id);
-            idToZone_.push_back(zone);
-            zoneTotal_.push_back(0);
-            zoneHour_.push_back({});
+        auto it = zoneId.find(zone);
+        if (it == zoneId.end()) {
+            id = (int)idZone.size();
+            zoneId[zone] = id;
+            idZone.push_back(zone);
+            zoneTotal.push_back(0);
+            zoneHour.push_back({});
         } else {
             id = it->second;
         }
 
-        ++zoneTotal_[id];
-        ++zoneHour_[id][hour];
+        zoneTotal[id]++;
+        zoneHour[id][hour]++;
     }
 }
 
 vector<ZoneCount> TripAnalyzer::topZones(int k) const {
-    if (k <= 0) return {};
-
     vector<ZoneCount> all;
-    all.reserve(idToZone_.size());
-    for (size_t id = 0; id < idToZone_.size(); ++id) {
-        all.push_back({ idToZone_[id], zoneTotal_[id] });
-    }
-    return topKByHeap(all, k, BetterZone{});
+    for (size_t i = 0; i < idZone.size(); i++)
+        all.push_back({idZone[i], zoneTotal[i]});
+
+    sort(all.begin(), all.end(), [](const ZoneCount& a, const ZoneCount& b) {
+        if (a.count != b.count) return a.count > b.count;
+        return a.zone < b.zone;
+    });
+
+    if ((int)all.size() > k) all.resize(k);
+    return all;
 }
 
 vector<SlotCount> TripAnalyzer::topBusySlots(int k) const {
-    if (k <= 0) return {};
+    vector<SlotCount> all;
 
-    priority_queue<SlotCount, vector<SlotCount>, BetterSlot> pq(BetterSlot{});
-    for (size_t id = 0; id < idToZone_.size(); ++id) {
-        const auto& zone = idToZone_[id];
-        const auto& hours = zoneHour_[id];
-        for (int h = 0; h < 24; ++h) {
-            long long cnt = hours[h];
-            if (cnt <= 0) continue;
-
-            SlotCount cand{ zone, h, cnt };
-            if ((int)pq.size() < k) pq.push(cand);
-            else if (BetterSlot{}(cand, pq.top())) {
-                pq.pop();
-                pq.push(cand);
-            }
+    for (size_t i = 0; i < idZone.size(); i++) {
+        for (int h = 0; h < 24; h++) {
+            if (zoneHour[i][h] > 0)
+                all.push_back({idZone[i], h, zoneHour[i][h]});
         }
     }
 
-    vector<SlotCount> out;
-    out.reserve(pq.size());
-    while (!pq.empty()) {
-        out.push_back(pq.top());
-        pq.pop();
-    }
-    sort(out.begin(), out.end(), BetterSlot{});
-    return out;
+    sort(all.begin(), all.end(), [](const SlotCount& a, const SlotCount& b) {
+        if (a.count != b.count) return a.count > b.count;
+        if (a.zone != b.zone) return a.zone < b.zone;
+        return a.hour < b.hour;
+    });
+
+    if ((int)all.size() > k) all.resize(k);
+    return all;
 }
