@@ -1,6 +1,10 @@
+// analyzer.h
 #pragma once
-#include <string>
+
 #include <vector>
+#include <string>
+#include <unordered_map>
+#include <array>
 
 struct ZoneCount {
     std::string zone;
@@ -9,18 +13,19 @@ struct ZoneCount {
 
 struct SlotCount {
     std::string zone;
-    int hour;              // 0–23
+    int hour;
     long long count;
 };
 
 class TripAnalyzer {
 public:
-    // Parse Trips.csv, skip dirty rows, never crash
-    void ingestFile(const std::string& csvPath);
-
-    // Top K zones: count desc, zone asc
+    void ingestStdin();
     std::vector<ZoneCount> topZones(int k = 10) const;
-
-    // Top K slots: count desc, zone asc, hour asc
     std::vector<SlotCount> topBusySlots(int k = 10) const;
+
+private:
+    std::unordered_map<std::string, int> zoneToId_;
+    std::vector<std::string> idToZone_;
+    std::vector<long long> zoneTotal_;
+    std::vector<std::array<long long, 24>> zoneHour_;
 };
