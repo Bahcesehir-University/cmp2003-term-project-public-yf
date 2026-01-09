@@ -1,12 +1,7 @@
 #include "analyzer.h"
 
-#include <iostream>
-#include <vector>
-#include <string>
-#include <unordered_map>
-#include <array>
-#include <algorithm>
 #include <fstream>
+#include <algorithm>
 #include <queue>
 #include <cctype>
 
@@ -14,61 +9,35 @@ using namespace std;
 
 namespace {
 
-static inline void trimInPlace(std::string& s) {
-    size_t b = 0;
-    while (b < s.size() && std::isspace((unsigned char)s[b])) ++b;
-    size_t e = s.size();
+static inline void trimRange(const std::string& s, size_t& b, size_t& e) {
+    while (b < e && std::isspace((unsigned char)s[b])) ++b;
     while (e > b && std::isspace((unsigned char)s[e - 1])) --e;
-    if (b == 0 && e == s.size()) return;
-    s = s.substr(b, e - b);
 }
 
-static inline std::vector<std::string> splitCSV6(const std::string& line) {
-    std::vector<std::string> out;
-    out.reserve(6);
-    size_t start = 0;
-    while (start <= line.size()) {
-        size_t comma = line.find(',', start);
-        if (comma == std::string::npos) comma = line.size();
-        std::string field = line.substr(start, comma - start);
-        trimInPlace(field);
-        out.push_back(std::move(field));
-        if (comma == line.size()) break;
-        start = comma + 1;
-    }
-    return out;
-}
+static inline bool parseHourFromPickupTimeField(const std::string& field, int& hourOut) {
+    size_t b = 0, e = field.size();
+    trimRange(field, b, e);
+    if (b >= e) return false;
 
-static inline bool isLikelyHeader(const std::string& line) {
-    return (line.find("TripID") != std::string::npos) &&
-           (line.find("PickupZoneID") != std::string::npos);
-}
+    size_t sep = field.find(' ', b);
+    if (sep == std::string::npos || sep + 1 >= e) return false;
 
-static inline bool parseHour(const std::string& pickupDateTime, int& hourOut) {
-    std::string s = pickupDateTime;
-    trimInPlace(s);
-    if (s.empty()) return false;
-
-    size_t sep = s.find(' ');
-    if (sep == std::string::npos) sep = s.find('T');
-    if (sep == std::string::npos || sep + 1 >= s.size()) return false;
-
-    std::string t = s.substr(sep + 1);
-    trimInPlace(t);
-    if (t.empty()) return false;
-
-    size_t colon = t.find(':');
-    if (colon == std::string::npos) return false;
-
-    std::string h = t.substr(0, colon);
-    trimInPlace(h);
-    if (h.empty() || h.size() > 2) return false;
+    size_t hb = sep + 1;
+    while (hb < e && std::isspace((unsigned char)field[hb])) ++hb;
+    if (hb >= e) return false;
 
     int val = 0;
-    for (char c : h) {
-        if (!std::isdigit((unsigned char)c)) return false;
-        val = val * 10 + (c - '0');
+    int digits = 0;
+    size_t i = hb;
+
+    while (i < e && std::isdigit((unsigned char)field[i]) && digits < 2) {
+        val = val * 10 + (field[i] - '0');
+        ++i;
+        ++digits;
     }
+
+    if (digits == 0) return false;
+    if (i >= e || field[i] != ':') return false;
     if (val < 0 || val > 23) return false;
 
     hourOut = val;
@@ -92,8 +61,7 @@ struct BetterSlot {
 
 template <class T, class Better>
 static std::vector<T> topKByHeap(const std::vector<T>& items, int k, Better better) {
-    if (k <= 0) return {};
-    if (items.empty()) return {};
+    if (k <= 0 || items.empty()) return {};
 
     std::priority_queue<T, std::vector<T>, Better> pq(better);
 
@@ -117,75 +85,62 @@ static std::vector<T> topKByHeap(const std::vector<T>& items, int k, Better bett
     return out;
 }
 
-static void ingestFromStream(std::istream& in,
-                            std::unordered_map<std::string, int>& zoneToId,
-                            std::vector<std::string>& idToZone,
-                            std::vector<long long>& zoneTotal,
-                            std::vector<std::array<long long, 24>>& zoneHour) {
-    zoneToId.clear();
-    idToZone.clear();
-    zoneTotal.clear();
-    zoneHour.clear();
+} // namespace
+
+void TripAnalyzer::ingestFile(const std::string& csvPath) {
+    zoneToId_.clear();
+    idToZone_.clear();
+    zoneTotal_.clear();
+    zoneHour_.clear();
+
+    std::ifstream fin(csvPath);
+    if (!fin.is_open()) return;
 
     std::string line;
-    bool firstLine = true;
-    zoneToId.reserve(200000);
 
-    while (std::getline(in, line)) {
-        if (firstLine) {
-            firstLine = false;
-            if (isLikelyHeader(line)) continue;
-        }
+    if (!std::getline(fin, line)) return;
+
+    zoneToId_.reserve(200000);
+
+    while (std::getline(fin, line)) {
         if (line.empty()) continue;
 
-        auto fields = splitCSV6(line);
-        if (fields.size() < 6) continue;
+        size_t c1 = line.find(',');
+        if (c1 == std::string::npos) continue;
 
-        const std::string& zone = fields[1];
-        const std::string& dt   = fields[3];
-        if (zone.empty() || dt.empty()) continue;
+        size_t c2 = line.find(',', c1 + 1);
+        if (c2 == std::string::npos) continue;
+
+        if (line.find(',', c2 + 1) != std::string::npos) continue;
+
+        size_t zb = c1 + 1, ze = c2;
+        trimRange(line, zb, ze);
+        if (zb >= ze) continue;
+
+        std::string zone = line.substr(zb, ze - zb);
+
+        size_t tb = c2 + 1, te = line.size();
+        trimRange(line, tb, te);
+        if (tb >= te) continue;
 
         int hour = -1;
-        if (!parseHour(dt, hour)) continue;
+        if (!parseHourFromPickupTimeField(line.substr(tb, te - tb), hour)) continue;
 
         int id;
-        auto it = zoneToId.find(zone);
-        if (it == zoneToId.end()) {
-            id = (int)idToZone.size();
-            zoneToId.emplace(zone, id);
-            idToZone.push_back(zone);
-            zoneTotal.push_back(0);
-            zoneHour.push_back({});
+        auto it = zoneToId_.find(zone);
+        if (it == zoneToId_.end()) {
+            id = (int)idToZone_.size();
+            zoneToId_.emplace(zone, id);
+            idToZone_.push_back(zone);
+            zoneTotal_.push_back(0);
+            zoneHour_.push_back({});
         } else {
             id = it->second;
         }
 
-        ++zoneTotal[id];
-        ++zoneHour[id][hour];
+        ++zoneTotal_[id];
+        ++zoneHour_[id][hour];
     }
-}
-
-} // namespace
-
-void TripAnalyzer::ingestStdin() {
-    std::ios::sync_with_stdio(false);
-    std::cin.tie(nullptr);
-    ingestFromStream(std::cin, zoneToId_, idToZone_, zoneTotal_, zoneHour_);
-}
-
-void TripAnalyzer::ingestFile(const std::string& filename) {
-    std::ios::sync_with_stdio(false);
-    std::cin.tie(nullptr);
-
-    std::ifstream fin(filename);
-    if (!fin.is_open()) {
-        zoneToId_.clear();
-        idToZone_.clear();
-        zoneTotal_.clear();
-        zoneHour_.clear();
-        return;
-    }
-    ingestFromStream(fin, zoneToId_, idToZone_, zoneTotal_, zoneHour_);
 }
 
 std::vector<ZoneCount> TripAnalyzer::topZones(int k) const {
@@ -208,6 +163,7 @@ std::vector<SlotCount> TripAnalyzer::topBusySlots(int k) const {
     for (size_t id = 0; id < idToZone_.size(); ++id) {
         const std::string& zone = idToZone_[id];
         const auto& hours = zoneHour_[id];
+
         for (int h = 0; h < 24; ++h) {
             long long cnt = hours[h];
             if (cnt <= 0) continue;
@@ -228,6 +184,8 @@ std::vector<SlotCount> TripAnalyzer::topBusySlots(int k) const {
         out.push_back(pq.top());
         pq.pop();
     }
+
     std::sort(out.begin(), out.end(), BetterSlot{});
     return out;
 }
+
