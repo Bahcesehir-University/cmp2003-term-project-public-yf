@@ -1,12 +1,12 @@
 #include "analyzer.h"
 
 #include <iostream>
+#include <fstream>
 #include <vector>
 #include <string>
 #include <unordered_map>
 #include <array>
 #include <algorithm>
-#include <fstream>
 #include <queue>
 #include <cctype>
 
@@ -14,63 +14,60 @@ using namespace std;
 
 namespace {
 
-static inline void trimInPlace(std::string& s) {
+static inline void trimInPlace(string& s) {
     size_t b = 0;
-    while (b < s.size() && std::isspace((unsigned char)s[b])) ++b;
+    while (b < s.size() && isspace((unsigned char)s[b])) ++b;
     size_t e = s.size();
-    while (e > b && std::isspace((unsigned char)s[e - 1])) --e;
+    while (e > b && isspace((unsigned char)s[e - 1])) --e;
     if (b == 0 && e == s.size()) return;
     s = s.substr(b, e - b);
 }
 
-static inline std::vector<std::string> splitCSV6(const std::string& line) {
-    std::vector<std::string> out;
+static inline vector<string> splitCSV6(const string& line) {
+    vector<string> out;
     out.reserve(6);
     size_t start = 0;
     while (start <= line.size()) {
         size_t comma = line.find(',', start);
-        if (comma == std::string::npos) comma = line.size();
-        std::string field = line.substr(start, comma - start);
+        if (comma == string::npos) comma = line.size();
+        string field = line.substr(start, comma - start);
         trimInPlace(field);
-        out.push_back(std::move(field));
+        out.push_back(field);
         if (comma == line.size()) break;
         start = comma + 1;
     }
     return out;
 }
 
-static inline bool isLikelyHeader(const std::string& line) {
-    return (line.find("TripID") != std::string::npos) &&
-           (line.find("PickupZoneID") != std::string::npos);
+static inline bool isLikelyHeader(const string& line) {
+    return (line.find("TripID") != string::npos) &&
+           (line.find("PickupZoneID") != string::npos);
 }
 
-static inline bool parseHour(const std::string& pickupDateTime, int& hourOut) {
-    std::string s = pickupDateTime;
+static inline bool parseHour(const string& pickupDateTime, int& hourOut) {
+    string s = pickupDateTime;
     trimInPlace(s);
-    if (s.empty()) return false;
 
     size_t sep = s.find(' ');
-    if (sep == std::string::npos) sep = s.find('T');
-    if (sep == std::string::npos || sep + 1 >= s.size()) return false;
+    if (sep == string::npos) sep = s.find('T');
+    if (sep == string::npos || sep + 1 >= s.size()) return false;
 
-    std::string t = s.substr(sep + 1);
+    string t = s.substr(sep + 1);
     trimInPlace(t);
-    if (t.empty()) return false;
 
     size_t colon = t.find(':');
-    if (colon == std::string::npos) return false;
+    if (colon == string::npos) return false;
 
-    std::string h = t.substr(0, colon);
+    string h = t.substr(0, colon);
     trimInPlace(h);
-    if (h.empty() || h.size() > 2) return false;
 
     int val = 0;
     for (char c : h) {
-        if (!std::isdigit((unsigned char)c)) return false;
+        if (!isdigit((unsigned char)c)) return false;
         val = val * 10 + (c - '0');
     }
-    if (val < 0 || val > 23) return false;
 
+    if (val < 0 || val > 23) return false;
     hourOut = val;
     return true;
 }
@@ -91,11 +88,10 @@ struct BetterSlot {
 };
 
 template <class T, class Better>
-static std::vector<T> topKByHeap(const std::vector<T>& items, int k, Better better) {
-    if (k <= 0) return {};
-    if (items.empty()) return {};
+static vector<T> topKByHeap(const vector<T>& items, int k, Better better) {
+    if (k <= 0 || items.empty()) return {};
 
-    std::priority_queue<T, std::vector<T>, Better> pq(better);
+    priority_queue<T, vector<T>, Better> pq(better);
 
     for (const auto& it : items) {
         if ((int)pq.size() < k) {
@@ -106,30 +102,83 @@ static std::vector<T> topKByHeap(const std::vector<T>& items, int k, Better bett
         }
     }
 
-    std::vector<T> out;
-    out.reserve(pq.size());
+    vector<T> out;
     while (!pq.empty()) {
         out.push_back(pq.top());
         pq.pop();
     }
 
-    std::sort(out.begin(), out.end(), better);
+    sort(out.begin(), out.end(), better);
     return out;
 }
 
-static void ingestFromStream(std::istream& in,
-                            std::unordered_map<std::string, int>& zoneToId,
-                            std::vector<std::string>& idToZone,
-                            std::vector<long long>& zoneTotal,
-                            std::vector<std::array<long long, 24>>& zoneHour) {
-    zoneToId.clear();
-    idToZone.clear();
-    zoneTotal.clear();
-    zoneHour.clear();
+} // namespace
 
-    std::string line;
+void TripAnalyzer::ingestFile(const string& csvPath) {
+    zoneToId_.clear();
+    idToZone_.clear();
+    zoneTotal_.clear();
+    zoneHour_.clear();
+
+    ifstream file(csvPath);
+    if (!file.is_open()) return;
+
+    string line;
     bool firstLine = true;
-    zoneToId.reserve(200000);
 
-    while (std::getline(in, line)) {
-        if (firstLine
+    while (getline(file, line)) {
+        if (firstLine) {
+            firstLine = false;
+            if (isLikelyHeader(line)) continue;
+        }
+        if (line.empty()) continue;
+
+        auto fields = splitCSV6(line);
+        if (fields.size() < 6) continue;
+
+        const string& zone = fields[1];
+        const string& dt   = fields[3];
+        if (zone.empty() || dt.empty()) continue;
+
+        int hour;
+        if (!parseHour(dt, hour)) continue;
+
+        int id;
+        auto it = zoneToId_.find(zone);
+        if (it == zoneToId_.end()) {
+            id = (int)idToZone_.size();
+            zoneToId_.emplace(zone, id);
+            idToZone_.push_back(zone);
+            zoneTotal_.push_back(0);
+            zoneHour_.push_back({});
+        } else {
+            id = it->second;
+        }
+
+        ++zoneTotal_[id];
+        ++zoneHour_[id][hour];
+    }
+}
+
+vector<ZoneCount> TripAnalyzer::topZones(int k) const {
+    vector<ZoneCount> all;
+    all.reserve(idToZone_.size());
+    for (size_t i = 0; i < idToZone_.size(); ++i)
+        all.push_back({idToZone_[i], zoneTotal_[i]});
+
+    return topKByHeap(all, k, BetterZone{});
+}
+
+vector<SlotCount> TripAnalyzer::topBusySlots(int k) const {
+    vector<SlotCount> all;
+
+    for (size_t i = 0; i < idToZone_.size(); ++i) {
+        for (int h = 0; h < 24; ++h) {
+            if (zoneHour_[i][h] > 0)
+                all.push_back({idToZone_[i], h, zoneHour_[i][h]});
+        }
+    }
+
+    return topKByHeap(all, k, BetterSlot{});
+}
+
