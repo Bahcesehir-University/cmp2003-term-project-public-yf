@@ -1,4 +1,3 @@
-// analyzer.h
 #pragma once
 
 #include <vector>
@@ -20,6 +19,8 @@ struct SlotCount {
 class TripAnalyzer {
 public:
     void ingestStdin();
+    void ingestFile(const std::string& filename);
+
     std::vector<ZoneCount> topZones(int k = 10) const;
     std::vector<SlotCount> topBusySlots(int k = 10) const;
 
