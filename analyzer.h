@@ -19,7 +19,7 @@ struct SlotCount {
 
 class TripAnalyzer {
 public:
-    void ingestFile(const std::string& csvPath);
+    void ingestFile(const std::string& filename);
     std::vector<ZoneCount> topZones(int k = 10) const;
     std::vector<SlotCount> topBusySlots(int k = 10) const;
 
@@ -31,3 +31,4 @@ private:
 };
 
 #endif
+
